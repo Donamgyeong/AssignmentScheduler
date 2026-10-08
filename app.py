@@ -10,8 +10,7 @@ from scheduler import allocate, sample, validate
 
 EMPLOYEE = [('name', '연구원 이름'), ('salary', '월 임금 (원)'), ('start', '시작월 YYYY-MM'), ('end', '종료월 YYYY-MM')]
 PROJECT = [('name', '과제 이름'), ('cash', '현금 예산 (원)'), ('kind', '현물 의무액 (원)'),
-           ('expenses', '기타 현금 지출 (원)'), ('start', '시작월 YYYY-MM'), ('end', '종료월 YYYY-MM'),
-           ('participants', '참여 연구원 (쉼표 구분)')]
+           ('expenses', '기타 현금 지출 (원)'), ('start', '시작월 YYYY-MM'), ('end', '종료월 YYYY-MM')]
 MONEY = {'salary', 'cash', 'kind', 'expenses', 'amount', 'required', 'refund', 'balance', 'delta', 'previous'}
 
 
@@ -54,13 +53,15 @@ class App(tk.Tk):
                                   ('CSV 양식 저장', lambda c=category: self.template(c))]:
                 ttk.Button(actions, text=text, command=command).pack(side='left', padx=4)
             if category == 'projects':
-                ttk.Label(frame, text='참여 연구원을 반드시 지정하세요. 예산은 입력한 수행기간 전체 금액이며 기타 지출에는 예정 지출도 포함하세요.').pack(anchor='w', pady=5)
-            self.trees[category] = self.tree(frame, fields)
+                ttk.Label(frame, text='기간이 겹치는 모든 연구원을 대상으로 참여와 금액을 자동 배분합니다. 예산은 수행기간 전체 금액입니다.').pack(anchor='w', pady=5)
+            self.trees[category] = self.tree(frame, fields + ([('auto_participants', '자동 배분 연구원')] if category == 'projects' else []))
             self.trees[category].bind('<Double-1>', lambda event, c=category: self.edit(c, True))
         self.result_frame = ttk.Frame(self.tabs)
         self.tabs.add(self.result_frame, text='과제별 결과')
         self.summary_label = ttk.Label(self.result_frame, text='연구원과 과제를 입력한 뒤 자동 배분을 실행하세요.')
         self.summary_label.pack(anchor='w', pady=12)
+        self.diagnostics_label = ttk.Label(self.result_frame, text='', wraplength=900, foreground='#a33b14')
+        self.diagnostics_label.pack(anchor='w', pady=(0, 12))
         self.trees['summary'] = self.tree(self.result_frame, [('name', '과제'), ('kind', '배분 현물'), ('required', '현물 의무액'),
             ('cash', '현금 인건비'), ('expenses', '기타 지출'), ('refund', '예상 반납액'), ('balance', '반납 후 현금 잔액')])
         self.trees['allocations'] = self.result_tab('월별 배분·비교', [('month', '월'), ('employee', '연구원'), ('project', '과제'),
@@ -108,7 +109,15 @@ class App(tk.Tk):
 
     def refresh(self):
         for key in ('employees', 'projects'):
-            self.fill(key, self.data[key])
+            rows = self.data[key]
+            if key == 'projects':
+                assigned = {}
+                if self.result is not None:
+                    for row in self.result['allocations']:
+                        assigned.setdefault(row['project'], set()).add(row['employee'])
+                rows = [dict(p, auto_participants=', '.join(sorted(assigned.get(p['name'], set())))
+                             if self.result is not None else '계산 전') for p in rows]
+            self.fill(key, rows)
 
     def changed(self):
         self.dirty = True
@@ -116,6 +125,7 @@ class App(tk.Tk):
         for name in ('summary', 'allocations', 'unused'):
             self.fill(name, [])
         self.summary_label.config(text='입력이 변경되었습니다. 자동 배분을 다시 실행하세요.')
+        self.diagnostics_label.config(text='')
         self.status.config(text=f'미저장 변경 있음 | 저장 위치: {self.folder}')
         self.refresh()
 
@@ -143,9 +153,6 @@ class App(tk.Tk):
                 candidate = json.loads(json.dumps(self.data))
                 if existing:
                     candidate[category][index] = item
-                    if category == 'employees' and item['name'] != row['name']:
-                        for project in candidate['projects']:
-                            project['participants'] = ','.join(item['name'] if n.strip() == row['name'] else n.strip() for n in project['participants'].split(','))
                 else:
                     candidate[category].append(item)
                 validate(candidate)
@@ -162,11 +169,8 @@ class App(tk.Tk):
             return
         index = int(selection[0])
         name = self.data[category][index]['name']
-        if messagebox.askyesno('삭제', f'{name} 항목을 삭제할까요? 연구원 삭제 시 참여 목록에서도 제외됩니다.'):
+        if messagebox.askyesno('삭제', f'{name} 항목을 삭제할까요?'):
             self.data[category].pop(index)
-            if category == 'employees':
-                for p in self.data['projects']:
-                    p['participants'] = ','.join(n.strip() for n in p['participants'].split(',') if n.strip() != name)
             self.changed()
 
     def load_sample(self):
@@ -232,9 +236,11 @@ class App(tk.Tk):
             for name in ('summary', 'unused'):
                 self.fill(name, self.result[name])
             self.fill('allocations', self.comparison())
+            self.refresh()
             refund = sum(r['refund'] for r in self.result['summary'])
             overspend = sum(max(0, -r['balance']) for r in self.result['summary'])
             self.summary_label.config(text=f'예상 반납액 합계: {refund:,}원 | 현금 부족 합계: {overspend:,}원 | 추천안이며 실제 집행·현물 인정 결과가 아닙니다.')
+            self.diagnostics_label.config(text='\n'.join(self.result['diagnostics']))
             self.tabs.select(self.result_frame)
             self.status.config(text='계산 완료. 확정은 비교 기준안 저장이며 집행기간 고정 기능은 아직 지원하지 않습니다.')
         except (ValueError, KeyError, TypeError) as error:
@@ -292,7 +298,7 @@ class App(tk.Tk):
 
     def write_csv(self, path, fields, rows):
         with open(path, 'w', encoding='utf-8-sig', newline='') as output:
-            writer = csv.DictWriter(output, fieldnames=[key for key, _ in fields])
+            writer = csv.DictWriter(output, fieldnames=[key for key, _ in fields], extrasaction='ignore')
             writer.writeheader()
             writer.writerows(rows)
 

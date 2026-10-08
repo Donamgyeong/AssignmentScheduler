@@ -28,14 +28,6 @@ def validate(data):
             for field in fields:
                 if type(row[field]) is not int or row[field] < 0:
                     raise ValueError('금액은 0 이상의 정수(원)여야 합니다.')
-    names = {e['name'] for e in data['employees']}
-    for project in data['projects']:
-        participants = project['participants']
-        if not isinstance(participants, str):
-            raise ValueError('참여 연구원은 쉼표로 구분한 이름이어야 합니다.')
-        selected = {n.strip() for n in participants.split(',') if n.strip()}
-        if selected - names:
-            raise ValueError('존재하지 않는 참여 연구원: ' + ', '.join(sorted(selected - names)))
 
 
 class Flow:
@@ -98,10 +90,9 @@ def allocate(data):
             target = ('project', name)
             flow.edge(target, sink, capacity)
             active = set(months(p['start'], p['end']))
-            participants = {n.strip() for n in p['participants'].split(',') if n.strip()}
             for key, remaining in available.items():
                 employee, month = key
-                if month in active and employee in participants:
+                if month in active:
                     edge = flow.edge(('employee', *key), target, remaining)
                     edges.append((key, name, edge))
         flow.solve(source, sink)
@@ -115,16 +106,25 @@ def allocate(data):
     phase('kind')
     phase('cash')
     summary = []
+    diagnostics = []
     for p in data['projects']:
         total = totals[p['name']]
         refund = max(0, p['kind'] - total['kind'])
         balance = p['cash'] - p['expenses'] - total['cash'] - refund
         summary.append(dict(name=p['name'], kind=total['kind'], required=p['kind'],
                             cash=total['cash'], expenses=p['expenses'], refund=refund, balance=balance))
+        active = set(months(p['start'], p['end']))
+        eligible = [e for e in data['employees'] if active.intersection(months(e['start'], e['end']))]
+        if not eligible:
+            diagnostics.append(f"{p['name']}: 연구원의 재직기간과 과제 수행기간이 겹치지 않습니다.")
+        elif not any(e['salary'] > 0 for e in eligible):
+            diagnostics.append(f"{p['name']}: 해당 기간 참여 연구원의 월 임금이 모두 0원입니다.")
+        elif refund:
+            diagnostics.append(f"{p['name']}: 참여 가능한 인건비를 배분했으나 현물이 {refund:,}원 부족합니다. 다른 과제와의 배분 경쟁도 확인하세요.")
     rows = [dict(employee=k[0], month=k[1], project=k[2], category=k[3], amount=v)
             for k, v in sorted(allocations.items())]
     unused = [dict(employee=k[0], month=k[1], amount=v) for k, v in sorted(available.items()) if v]
-    return dict(summary=summary, allocations=rows, unused=unused)
+    return dict(summary=summary, allocations=rows, unused=unused, diagnostics=diagnostics)
 
 
 def sample():
@@ -134,6 +134,6 @@ def sample():
         dict(name='박연구', salary=3000000, start='2026-11', end='2026-12')],
         'projects': [
             dict(name='과제 A', cash=18000000, kind=12000000, expenses=4000000,
-                 start='2026-10', end='2026-12', participants='김연구,이연구'),
+                 start='2026-10', end='2026-12'),
             dict(name='과제 B', cash=12000000, kind=10000000, expenses=3000000,
-                 start='2026-11', end='2026-12', participants='이연구,박연구')]}
+                 start='2026-11', end='2026-12')]}
