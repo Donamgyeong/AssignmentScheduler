@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.prototype-check/
+build/
+dist/
+*.spec
